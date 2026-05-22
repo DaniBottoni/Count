@@ -1,0 +1,16 @@
+{
+  "name": "Count",
+  "version": "1.0.0",
+  "description": "Counting bpt",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["discord", "bot", "moderation", "warnings"],
+  "author": "sleepy",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "pg": "^8.11.0"
+  }
+}
