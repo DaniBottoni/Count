@@ -14,6 +14,10 @@ const client = new Client({
 });
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
+// ── Pending saves (in-memory, keyed by prompt message ID) ────────────────────
+// { guildId, userId, prevCount, timeoutId }
+const pendingSaves = new Map();
+
 // ── DB ───────────────────────────────────────────────────────────────────────
 async function initDB() {
     await pool.query(`
@@ -63,21 +67,23 @@ function defaultState() {
 }
 
 // ── Stats DB helpers ─────────────────────────────────────────────────────────
+// Returns the updated stats object
 async function updateUserStat(guildId, userId, delta) {
     try {
         const res = await pool.query('SELECT data FROM user_stats WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
-        const cur = res.rows[0]?.data ?? { correct: 0, ruined: 0 };
+        const cur = res.rows[0]?.data ?? { correct: 0, ruined: 0, saves: 0, savesUsed: 0 };
         for (const [k, v] of Object.entries(delta)) cur[k] = (cur[k] || 0) + v;
         await pool.query(
             'INSERT INTO user_stats (guild_id, user_id, data) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET data = $3',
             [guildId, userId, cur]
         );
-    } catch (e) { console.error('updateUserStat:', e.message); }
+        return cur;
+    } catch (e) { console.error('updateUserStat:', e.message); return null; }
 }
 
 async function getUserStats(guildId, userId) {
     const res = await pool.query('SELECT data FROM user_stats WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
-    return res.rows[0]?.data ?? { correct: 0, ruined: 0 };
+    return res.rows[0]?.data ?? { correct: 0, ruined: 0, saves: 0, savesUsed: 0 };
 }
 
 async function getUserRank(guildId, userId) {
@@ -115,11 +121,10 @@ async function getGlobalUserLeaderboard() {
 }
 
 async function getGlobalServerLeaderboard() {
-    // Ranks servers by their all-time high score stored in the counting table
     const res = await pool.query(`
         SELECT guild_id,
-               COALESCE((data->>'highScore')::int, 0)    AS high_score,
-               COALESCE((data->>'current')::int,   0)    AS current_count
+               COALESCE((data->>'highScore')::int, 0) AS high_score,
+               COALESCE((data->>'current')::int,   0) AS current_count
         FROM counting
         ORDER BY high_score DESC
         LIMIT 10
@@ -147,16 +152,21 @@ async function buildUserStatsEmbed(guildId, targetUser) {
     ]);
     const total    = (stats.correct || 0) + (stats.ruined || 0);
     const accuracy = total > 0 ? Math.round((stats.correct / total) * 100) : 100;
+    const saves    = stats.saves ?? 0;
+    const nextSave = 50 - ((stats.correct ?? 0) % 50);
     return new EmbedBuilder().setColor('#5865F2')
         .setTitle(`📊 Stats — ${targetUser.username}`)
         .setThumbnail(targetUser.displayAvatarURL())
         .addFields(
-            { name: '✅ Correct counts',    value: `**${stats.correct ?? 0}**`, inline: true },
-            { name: '💥 Times ruined',      value: `**${stats.ruined  ?? 0}**`, inline: true },
-            { name: '🎯 Accuracy',          value: `**${accuracy}%**`,          inline: true },
-            { name: '🏅 Server rank',       value: `**#${rank}**`,              inline: true },
-            { name: '🔢 Current count',     value: `**${state.current}**`,      inline: true },
-            { name: '🏆 Server high score', value: `**${state.highScore}**`,    inline: true },
+            { name: '✅ Correct counts',    value: `**${stats.correct ?? 0}**`,                           inline: true },
+            { name: '💥 Times ruined',      value: `**${stats.ruined  ?? 0}**`,                           inline: true },
+            { name: '🎯 Accuracy',          value: `**${accuracy}%**`,                                    inline: true },
+            { name: '🏅 Server rank',       value: `**#${rank}**`,                                        inline: true },
+            { name: '🔢 Current count',     value: `**${state.current}**`,                                inline: true },
+            { name: '🏆 Server high score', value: `**${state.highScore}**`,                              inline: true },
+            { name: '🛡️ Saves available',  value: `**${saves}**`,                                        inline: true },
+            { name: '⏳ Next save in',      value: saves > 0 ? `**${nextSave}** counts` : `**${nextSave}** counts`, inline: true },
+            { name: '🔖 Saves used',        value: `**${stats.savesUsed ?? 0}**`,                         inline: true },
         );
 }
 
@@ -174,12 +184,12 @@ async function buildServerStatsEmbed(guild) {
         .setTitle(`📊 Server Stats — ${guild.name}`)
         .setThumbnail(guild.iconURL())
         .addFields(
-            { name: '👥 Active counters',  value: `**${totalUsers}**`,     inline: true },
-            { name: '✅ Total correct',    value: `**${totalCounts}**`,    inline: true },
-            { name: '💥 Total ruined',     value: `**${totalRuined}**`,    inline: true },
-            { name: '🎯 Server accuracy',  value: `**${accuracy}%**`,      inline: true },
-            { name: '🔢 Current count',    value: `**${state.current}**`,  inline: true },
-            { name: '🏆 All-time high',    value: `**${state.highScore}**`, inline: true },
+            { name: '👥 Active counters', value: `**${totalUsers}**`,      inline: true },
+            { name: '✅ Total correct',   value: `**${totalCounts}**`,     inline: true },
+            { name: '💥 Total ruined',    value: `**${totalRuined}**`,     inline: true },
+            { name: '🎯 Server accuracy', value: `**${accuracy}%**`,       inline: true },
+            { name: '🔢 Current count',   value: `**${state.current}**`,   inline: true },
+            { name: '🏆 All-time high',   value: `**${state.highScore}**`, inline: true },
         );
 }
 
@@ -200,9 +210,7 @@ async function buildGlobalServersEmbed() {
     const rows   = await getGlobalServerLeaderboard();
     const medals = ['🥇', '🥈', '🥉'];
     if (!rows.length) return new EmbedBuilder().setColor('#5865F2').setTitle('🌍 Global Leaderboard — Servers').setDescription('No stats yet!');
-
     const lines = await Promise.all(rows.map(async (r, i) => {
-        // Try to resolve the guild name; fall back to the raw ID if not cached
         let name;
         try {
             const guild = client.guilds.cache.get(r.guild_id) ?? await client.guilds.fetch(r.guild_id).catch(() => null);
@@ -210,7 +218,6 @@ async function buildGlobalServersEmbed() {
         } catch { name = `Server ${r.guild_id}`; }
         return `${medals[i] ?? `**${i+1}.**`} **${name}** — 🏆 High score **${r.high_score}** · Current **${r.current_count}**`;
     }));
-
     return new EmbedBuilder().setColor('#5865F2')
         .setTitle('🌍 Global Leaderboard — Servers')
         .setDescription(lines.join('\n'))
@@ -325,7 +332,8 @@ function buildHelpPage(page) {
                 { name: '📌 Rules', value: '• Type the next number in the sequence\n• You can\'t count twice in a row (by default)\n• Wrong number? The count resets to 1!\n• Math expressions like `2+2`, `pi^2` are supported' },
                 { name: '✅ Correct count', value: 'React gets added, count goes up' },
                 { name: '❌ Wrong / too fast', value: 'Count resets — everyone starts over!' },
-                { name: '🏆 Milestones', value: 'The bot celebrates every 100 counts' }
+                { name: '🏆 Milestones', value: 'The bot celebrates every 100 counts' },
+                { name: '🛡️ Saves', value: 'Earn 1 save every 50 correct counts. If you ruin the count, a save lets you undo it within 15 seconds!' }
             ).setFooter({ text: 'Page 1/4 • Counting Bot' }),
 
         new EmbedBuilder().setColor('#5865F2').setTitle('📋 Commands')
@@ -373,6 +381,75 @@ async function hasPermission(interaction, guildId) {
     if (interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return true;
     const state = await getState(guildId);
     return state.accessRoleId ? interaction.member.roles.cache.has(state.accessRoleId) : false;
+}
+
+// ── Save prompt helpers ───────────────────────────────────────────────────────
+async function triggerRuin(channel, guildId, state, userId, reason) {
+    const prev = state.current;
+    const stats = await getUserStats(guildId, userId);
+    const hasSave = (stats.saves ?? 0) > 0;
+
+    if (hasSave) {
+        // Don't reset yet — give the user 15s to use their save
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`saveuse_${userId}`)
+                .setLabel(`🛡️ Use Save (${stats.saves} left)`)
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`savedecline_${userId}`)
+                .setLabel('❌ Let it reset')
+                .setStyle(ButtonStyle.Danger),
+        );
+
+        const prompt = await channel.send({
+            embeds: [E('#ff9900', '⚠️ Count almost ruined!')
+                .setDescription(`<@${userId}> made a mistake! (${reason})\n\n<@${userId}>, you have a **🛡️ Save** — use it within **15 seconds** to keep the count at **${prev}**!`)
+                .addFields({ name: '🛡️ Saves available', value: `**${stats.saves}**`, inline: true }, { name: '🔢 Count at risk', value: `**${prev}**`, inline: true })
+            ],
+            components: [row],
+        }).catch(() => null);
+
+        if (!prompt) {
+            // Message failed — just reset
+            doReset(channel, guildId, state, userId, prev);
+            return;
+        }
+
+        const timeoutId = setTimeout(async () => {
+            if (!pendingSaves.has(prompt.id)) return;
+            pendingSaves.delete(prompt.id);
+            doReset(channel, guildId, state, userId, prev);
+            await prompt.edit({
+                embeds: [E('#ff4444', '💥 Save expired — count ruined!')
+                    .setDescription(`<@${userId}> didn't use their save in time!\nThe count resets from **${prev}** back to **1**.`)
+                    .addFields({ name: '🏆 High Score', value: `**${state.highScore}**`, inline: true })
+                ],
+                components: [],
+            }).catch(() => {});
+        }, 15_000);
+
+        pendingSaves.set(prompt.id, { guildId, userId, prevCount: prev, timeoutId, state: { ...state } });
+
+    } else {
+        // No save — reset immediately
+        doReset(channel, guildId, state, userId, prev);
+        await channel.send({
+            embeds: [E('#ff4444', '💥 Count ruined!')
+                .setDescription(`<@${userId}> ruined the count! (${reason})\nThe count was at **${prev}**.`)
+                .addFields({ name: '🔄 Reset to', value: '**1**', inline: true }, { name: '🏆 High Score', value: `**${state.highScore}**`, inline: true })
+                .setFooter({ text: 'Start again from 1!' })
+            ]
+        }).catch(() => {});
+    }
+}
+
+function doReset(channel, guildId, state, userId, prev) {
+    state.current = 0;
+    state.lastUserId = null;
+    state.consecutiveCount = 0;
+    saveState(guildId, state);
+    updateUserStat(guildId, userId, { ruined: 1 });
 }
 
 // ── Keep-alive ───────────────────────────────────────────────────────────────
@@ -439,6 +516,9 @@ client.on('messageCreate', async message => {
     const state = await getState(guildId).catch(() => null);
     if (!state?.channelId || message.channel.id !== state.channelId) return;
 
+    // Block new counts while a save prompt is active for this guild
+    if ([...pendingSaves.values()].some(p => p.guildId === guildId)) return;
+
     const raw = message.content.trim();
     const hasConst = Object.keys(CONSTANTS).some(c => raw.toLowerCase().includes(c));
     const isExpression = (/[+\-*/^()]/.test(raw) && !/^\-?\d+$/.test(raw)) || hasConst;
@@ -458,43 +538,40 @@ client.on('messageCreate', async message => {
 
     const expected = state.current + 1;
 
+    // ── Wrong number ─────────────────────────────────────────────────────────
     if (value !== expected) {
         await message.react('❌').catch(() => {});
-        const prev = state.current;
-        state.current = 0; state.lastUserId = null; state.consecutiveCount = 0;
-        saveState(guildId, state);
-        updateUserStat(guildId, message.author.id, { ruined: 1 });
-        await message.channel.send({
-            embeds: [E('#ff4444', '💥 Count ruined!')
-                .setDescription(`<@${message.author.id}> ruined the count at **${prev}**!\nThe next number was \`${expected}\`, but \`${value}\` was sent.`)
-                .addFields({ name: '🔄 Reset to', value: '**1**', inline: true }, { name: '🏆 High Score', value: `**${state.highScore}**`, inline: true })
-                .setFooter({ text: 'Start again from 1!' })]
-        }).catch(() => {});
+        await triggerRuin(message.channel, guildId, state, message.author.id,
+            `sent \`${value}\` but expected \`${expected}\``);
         return;
     }
 
+    // ── Consecutive count violation ───────────────────────────────────────────
     if (state.maxStreak > 0 && message.author.id === state.lastUserId && state.consecutiveCount >= state.maxStreak) {
         await message.react('❌').catch(() => {});
-        const prev = state.current;
-        state.current = 0; state.lastUserId = null; state.consecutiveCount = 0;
-        saveState(guildId, state);
-        updateUserStat(guildId, message.author.id, { ruined: 1 });
-        await message.channel.send({
-            embeds: [E('#ff4444', '💥 Count ruined!')
-                .setDescription(`<@${message.author.id}> counted too many times in a row (limit: **${state.maxStreak}**)!\nThe count was at **${prev}**.`)
-                .addFields({ name: '🔄 Reset to', value: '**1**', inline: true }, { name: '🏆 High Score', value: `**${state.highScore}**`, inline: true })
-                .setFooter({ text: 'Let someone else count too!' })]
-        }).catch(() => {});
+        await triggerRuin(message.channel, guildId, state, message.author.id,
+            `counted more than **${state.maxStreak}** time(s) in a row`);
         return;
     }
 
+    // ── Correct count ─────────────────────────────────────────────────────────
     const isSameUser = message.author.id === state.lastUserId;
     state.current = value;
     state.lastUserId = message.author.id;
     state.consecutiveCount = isSameUser ? state.consecutiveCount + 1 : 1;
     if (value > state.highScore) state.highScore = value;
     saveState(guildId, state);
-    updateUserStat(guildId, message.author.id, { correct: 1 });
+
+    // Update stats and check for save milestone
+    const newStats = await updateUserStat(guildId, message.author.id, { correct: 1 });
+    if (newStats && newStats.correct > 0 && newStats.correct % 50 === 0) {
+        await updateUserStat(guildId, message.author.id, { saves: 1 });
+        await message.channel.send({
+            embeds: [E('#ffd700', '🛡️ Save earned!')
+                .setDescription(`<@${message.author.id}> earned a **Save** for reaching **${newStats.correct}** correct counts!\nYou now have **${(newStats.saves ?? 0) + 1}** save(s). Use it if you ever ruin the count!`)
+            ]
+        }).catch(() => {});
+    }
 
     const numberEmojis = ['0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣'];
     await message.react(value <= 9 ? numberEmojis[value] : '✅').catch(() => {});
@@ -520,6 +597,66 @@ client.on('interactionCreate', async interaction => {
             const page = parseInt(interaction.customId.split('_')[1]);
             if (!isNaN(page) && page >= 1 && page <= 4)
                 return interaction.update(buildHelpPage(page));
+        }
+
+        // Save prompt: use save
+        if (interaction.customId.startsWith('saveuse_')) {
+            const ownerId = interaction.customId.split('_')[1];
+            if (interaction.user.id !== ownerId)
+                return interaction.reply({ content: '❌ Only the person who ruined the count can use their save!', flags: [MessageFlags.Ephemeral] });
+
+            const pending = pendingSaves.get(interaction.message.id);
+            if (!pending) return interaction.reply({ content: '❌ This save prompt has already expired.', flags: [MessageFlags.Ephemeral] });
+
+            clearTimeout(pending.timeoutId);
+            pendingSaves.delete(interaction.message.id);
+
+            // Restore the state
+            const state = await getState(pending.guildId);
+            state.current = pending.prevCount;
+            state.lastUserId = ownerId;      // ruiner becomes last counter so they can't immediately count again
+            state.consecutiveCount = 1;
+            saveState(pending.guildId, state);
+
+            // Deduct save, increment savesUsed
+            await updateUserStat(pending.guildId, ownerId, { saves: -1, savesUsed: 1 });
+            const updated = await getUserStats(pending.guildId, ownerId);
+
+            await interaction.update({
+                embeds: [E('#00cc88', '🛡️ Save used!')
+                    .setDescription(`<@${ownerId}> used a **Save** — the count stays at **${pending.prevCount}**!`)
+                    .addFields(
+                        { name: '🛡️ Saves remaining', value: `**${updated.saves ?? 0}**`, inline: true },
+                        { name: '🔢 Count continues at', value: `**${pending.prevCount}**`, inline: true }
+                    )
+                ],
+                components: [],
+            }).catch(() => {});
+            return;
+        }
+
+        // Save prompt: decline
+        if (interaction.customId.startsWith('savedecline_')) {
+            const ownerId = interaction.customId.split('_')[1];
+            if (interaction.user.id !== ownerId)
+                return interaction.reply({ content: '❌ Only the person who ruined the count can decline.', flags: [MessageFlags.Ephemeral] });
+
+            const pending = pendingSaves.get(interaction.message.id);
+            if (!pending) return interaction.reply({ content: '❌ This save prompt has already expired.', flags: [MessageFlags.Ephemeral] });
+
+            clearTimeout(pending.timeoutId);
+            pendingSaves.delete(interaction.message.id);
+
+            doReset(null, pending.guildId, pending.state, ownerId, pending.prevCount);
+
+            await interaction.update({
+                embeds: [E('#ff4444', '💥 Count ruined!')
+                    .setDescription(`<@${ownerId}> chose not to use their save. The count resets from **${pending.prevCount}** back to **1**.`)
+                    .addFields({ name: '🏆 High Score', value: `**${pending.state.highScore}**`, inline: true })
+                ],
+                components: [],
+            }).catch(() => {});
+            return;
         }
 
         // Stats tab switching
@@ -651,12 +788,8 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (sub === 'global') {
-                // Open on the Users tab by default
                 const embed = await buildGlobalUsersEmbed();
-                return interaction.editReply({
-                    embeds: [embed],
-                    components: [globalLbRow('users')],
-                });
+                return interaction.editReply({ embeds: [embed], components: [globalLbRow('users')] });
             }
         }
 
