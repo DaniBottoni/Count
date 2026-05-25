@@ -488,10 +488,16 @@ client.on('messageCreate', async message => {
     if (value > state.highScore) state.highScore = value;
     saveState(gid, state);
 
-    const ns = await updateUserStat(gid, message.author.id, { correct:1 });
-    if (ns && ns.correct > 0 && ns.correct % 50 === 0) {
-        await updateUserStat(gid, message.author.id, { saves:1 });
-        await message.channel.send({ embeds:[E('#ffd700','🛡️ Save earned!').setDescription(`<@${message.author.id}> earned a **Save** for **${ns.correct}** correct counts! You now have **${(ns.saves??0)+1}** save(s).`)] }).catch(()=>{});
+    // Read current stats first so we can check if this correct count hits a milestone
+    const prevStats = await getUserStats(gid, message.author.id);
+    const newCorrect = (prevStats.correct || 0) + 1;
+    const earnedSave = newCorrect % 50 === 0; // hits milestone exactly on this count
+    const delta = { correct: 1 };
+    if (earnedSave) delta.saves = 1; // award the save atomically in the same write
+    const ns = await updateUserStat(gid, message.author.id, delta);
+
+    if (earnedSave && ns) {
+        await message.channel.send({ embeds:[E('#ffd700','🛡️ Save earned!').setDescription(`<@${message.author.id}> earned a **Save** for reaching **${newCorrect}** correct counts! You now have **${ns.saves ?? 1}** save(s).`)] }).catch(()=>{});
     }
     const ne = ['0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣'];
     await message.react(value<=9?ne[value]:'✅').catch(()=>{});
