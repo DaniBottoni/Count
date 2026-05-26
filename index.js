@@ -361,9 +361,15 @@ function doReset(guildId, state, userId) {
     updateUserStat(guildId, userId, { ruined:1 });
 }
 async function triggerRuin(channel, guildId, state, userId, reason) {
-    const prev=state.current, stats=await getUserStats(guildId, userId);
+    const prev = state.current;
+
+    // Set a placeholder immediately (before any awaits) so concurrent messages are blocked
+    const expiresAt = Date.now() + 30_000;
+    state.pendingSave = { placeholder: true, userId, prevCount: prev, expiresAt };
+    saveState(guildId, state);
+
+    const stats = await getUserStats(guildId, userId);
     if ((stats.saves??0) > 0) {
-        const expiresAt = Date.now() + 30_000; // 30 second window, survives restarts
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`saveuse_${userId}_${prev}_${guildId}_${expiresAt}`).setLabel(`🛡️ Use Save (${stats.saves} left)`).setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId(`savedecline_${userId}_${prev}_${guildId}_${expiresAt}`).setLabel('❌ Let it reset').setStyle(ButtonStyle.Danger),
@@ -374,7 +380,7 @@ async function triggerRuin(channel, guildId, state, userId, reason) {
             components:[row],
         }).catch(()=>null);
         if (!prompt) { doReset(guildId, state, userId); return; }
-        // Store pending save in DB so it survives restarts
+        // Upgrade placeholder to real entry now we have the message ID
         state.pendingSave = { msgId: prompt.id, userId, prevCount: prev, expiresAt };
         saveState(guildId, state);
         // Still clean up the message visually after 30s
