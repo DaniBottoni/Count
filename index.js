@@ -444,7 +444,7 @@ async function triggerRuin(channel, guildId, state, userId, reason) {
         }, 60_000);
     } else {
         doReset(guildId, state, userId);
-        await channel.send({ embeds: [E('#ff4444', '💥 Count ruined!').setDescription(`<@${userId}> ruined the count! (${reason})\nCount was at **${prev}**.`).addFields({ name: 'Reset to', value: '**1**', inline: true }, { name: 'High Score', value: `**${state.highScore}**`, inline: true }).setFooter({ text: 'Start again from 1!' })] }).catch(() => {});
+        await channel.send({ embeds: [E('#ff4444', '💥 Count ruined!').setDescription(`<@${userId}> ruined the count! (${reason})\nCount was at **${prev}**.`).addFields({ name: 'Reset to', value: '**1**', inline: true }, { name: 'High Score', value: `**${state.highScore}**`, inline: true }).setFooter({ text: 'Start again from 1!' })] }).catch(e => console.error('ruin msg failed:', e.message));
     }
 }
 
@@ -536,10 +536,11 @@ client.on('messageCreate', async message => {
         if (s) setTimeout(() => s.delete().catch(() => {}), 5000);
         return;
     }
-    if (value === null || value !== expected) {
+    if (value === null) return; // not a number at all — ignore silently
+    if (value !== expected) {
         if (!await claimMessage(message.id)) return;
         message.react('❌').catch(() => {});
-        await triggerRuin(message.channel, gid, state, message.author.id, value === null ? `sent a non-number` : `sent \`${value}\` but expected \`${expected}\``);
+        await triggerRuin(message.channel, gid, state, message.author.id, `sent \`${value}\` but expected \`${expected}\``);
         return;
     }
     if (state.maxStreak > 0 && message.author.id === state.lastUserId && state.consecutiveCount >= state.maxStreak) {
@@ -718,7 +719,7 @@ client.on('interactionCreate', async interaction => {
 
     try {
         if (cmd === 'help')   return interaction.reply({ ...buildHelpPage(1), ...ep() });
-        if (cmd === 'invite') return interaction.reply({ embeds: [E('#5865F2', 'Invite Counting Bot').setDescription(`[**Invite me!**](https://discord.com/oauth2/authorize?client_id=${client.user.id}&permissions=76864&scope=bot%20applications.commands)`).addFields({ name: 'Permissions', value: 'View Channels · Send Messages · Add Reactions · Read History · Manage Messages' })], ...ep() });
+        if (cmd === 'invite') return interaction.reply({ embeds: [E('#5865F2', 'Invite Counting Bot').setDescription(`[**Invite me!**](https://discord.com/oauth2/authorize?client_id=${client.user.id}&permissions=93248&scope=bot%20applications.commands)`).addFields({ name: 'Permissions', value: 'View Channels · Send Messages · Add Reactions · Read History · Manage Messages' })], ...ep() });
 
         if (cmd === 'setup') {
             if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'Admins only.', ...ep() });
