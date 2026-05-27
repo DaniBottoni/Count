@@ -231,86 +231,143 @@ function countTypeRow(current) {
     );
 }
 
-// ── Math ──────────────────────────────────────────────────────────────────────
+// ── Math (complex number evaluator) ──────────────────────────────────────────
+const SUP = {'⁰':'0','¹':'1','²':'2','³':'3','⁴':'4','⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9','⁺':'+','⁻':'-'};
+
+// Complex number class
+class C {
+    constructor(r=0,i=0){this.r=r;this.i=i;}
+    static of(x){return x instanceof C?x:new C(+x,0);}
+    add(b){b=C.of(b);return new C(this.r+b.r,this.i+b.i);}
+    sub(b){b=C.of(b);return new C(this.r-b.r,this.i-b.i);}
+    mul(b){b=C.of(b);return new C(this.r*b.r-this.i*b.i,this.r*b.i+this.i*b.r);}
+    div(b){b=C.of(b);const d=b.r*b.r+b.i*b.i;if(!d)return new C(NaN,NaN);return new C((this.r*b.r+this.i*b.i)/d,(this.i*b.r-this.r*b.i)/d);}
+    pow(b){
+        b=C.of(b);
+        if(this.r===0&&this.i===0)return(b.r===0&&b.i===0)?new C(1):new C(0);
+        return this.ln().mul(b).exp();
+    }
+    ln(){return new C(Math.log(Math.hypot(this.r,this.i)),Math.atan2(this.i,this.r));}
+    exp(){const e=Math.exp(this.r);return new C(e*Math.cos(this.i),e*Math.sin(this.i));}
+    neg(){return new C(-this.r,-this.i);}
+    sqrt(){const m=Math.hypot(this.r,this.i)**0.5,a=Math.atan2(this.i,this.r)/2;return new C(m*Math.cos(a),m*Math.sin(a));}
+    cbrt(){const m=Math.hypot(this.r,this.i)**(1/3),a=Math.atan2(this.i,this.r)/3;return new C(m*Math.cos(a),m*Math.sin(a));}
+    nthRoot(n){const m=Math.hypot(this.r,this.i)**(1/n),a=Math.atan2(this.i,this.r)/n;return new C(m*Math.cos(a),m*Math.sin(a));}
+    isReal(tol=1e-6){return Math.abs(this.i)<=tol;}
+}
+
+const CCONSTS = {
+    pi:new C(Math.PI), e:new C(Math.E), phi:new C((1+Math.sqrt(5))/2),
+    tau:new C(Math.PI*2), sqrt2:new C(Math.SQRT2), i:new C(0,1),
+};
+// Keep CONSTS alias for generateExpressions which uses plain numbers
 const CONSTS = { phi:(1+Math.sqrt(5))/2, pi:Math.PI, e:Math.E, tau:Math.PI*2, sqrt2:Math.SQRT2 };
 
-// Maps Unicode superscript digits/operators to ASCII
-const SUPERSCRIPTS = { '⁰':'0','¹':'1','²':'2','³':'3','⁴':'4','⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9','⁺':'+','⁻':'-' };
-
-function normaliseSuperscripts(str) {
-    // Replace runs of superscript digits/signs that follow a number or ) with ^digits
-    // e.g. "3²" → "3^2", "x³⁴" → "x^34", "2⁻¹" → "2^-1"
-    let result = '';
-    let i = 0;
-    while (i < str.length) {
-        const ch = str[i];
-        if (SUPERSCRIPTS[ch] !== undefined) {
-            // Collect the full superscript sequence
-            let sup = '';
-            while (i < str.length && SUPERSCRIPTS[str[i]] !== undefined) {
-                sup += SUPERSCRIPTS[str[i]]; i++;
-            }
-            result += '^' + sup;
-        } else {
-            result += ch; i++;
-        }
-    }
-    return result;
-}
-
 function safeMath(expr) {
-    let c = expr.trim().replace(/\s+/g,'');
-    if (!c) return null;
+    // 1. Normalise unicode
+    let s = expr.trim();
+    let norm = '';
+    for (let k=0;k<s.length;k++) {
+        if (SUP[s[k]] !== undefined) {
+            let sup=''; while(k<s.length&&SUP[s[k]]!==undefined)sup+=SUP[s[k++]]; norm+='^'+sup; k--;
+        } else norm+=s[k];
+    }
+    s = norm.replace(/[×·•]/g,'*').replace(/÷/g,'/').replace(/−/g,'-').replace(/\s+/g,'').toLowerCase();
+    // root symbols → function names
+    s = s.replace(/(\d+)√/g,(_,n)=>`nrt${n}(`);
+    s = s.replace(/∜/g,'nrt4(').replace(/∛/g,'cbrt(').replace(/√/g,'sqrt(');
 
-    // ── Normalise Unicode operators ───────────────────────────────────────────
-    // Superscripts: 3² → 3^2
-    c = normaliseSuperscripts(c);
-    // Multiplication: × · • → *
-    c = c.replace(/[×·•]/g, '*');
-    // Division: ÷ → /
-    c = c.replace(/÷/g, '/');
-    // Minus variants: − (minus sign) → -
-    c = c.replace(/−/g, '-');
+    // 2. Tokenise
+    let tokens=[], k=0;
+    while(k<s.length){
+        if(/\d/.test(s[k])||s[k]==='.'){
+            let n=''; while(k<s.length&&(/\d/.test(s[k])||s[k]==='.'))n+=s[k++];
+            tokens.push({t:'n',v:parseFloat(n)});
+        } else if(/[a-z]/.test(s[k])){
+            let id=''; while(k<s.length&&/[a-z0-9]/.test(s[k]))id+=s[k++];
+            tokens.push({t:'id',v:id});
+        } else if('+-*/^(),'.includes(s[k])){
+            tokens.push({t:'op',v:s[k++]});
+        } else k++;
+    }
 
-    // ── Roots ─────────────────────────────────────────────────────────────────
-    // √x  → Math.sqrt(x)    ∛x → Math.cbrt(x)    ∜x → Math.pow(x,1/4)
-    // Also support √(expr), ∛(expr), nᵗʰ root with n√x e.g. 3√8
-    c = c.replace(/(\d+(?:\.\d+)?)√/g, (_,n) => `Math.pow(`  + ',' + `1/${n})`);  // n√x pattern — handled below
-    // Simpler: replace all root symbols
-    c = c.replace(/∜/g, 'FOURTHROOT');
-    c = c.replace(/∛/g, 'CBRT');
-    c = c.replace(/√/g,  'SQRT');
+    // 3. Insert implicit multiplication:
+    //    number/const/) followed by number/identifier/(
+    //    BUT NOT function-name followed by (
+    const FUNCS = new Set(['sqrt','cbrt']);
+    const isFunc = v => FUNCS.has(v) || /^nrt\d+$/.test(v);
+    const out=[];
+    for(let j=0;j<tokens.length;j++){
+        out.push(tokens[j]);
+        const cur=tokens[j],nxt=tokens[j+1];
+        if(!nxt)continue;
+        const leftOk  = cur.t==='n' || (cur.t==='id'&&!isFunc(cur.v)) || (cur.t==='op'&&cur.v===')');
+        const rightOk = nxt.t==='n' || nxt.t==='id' || (nxt.t==='op'&&nxt.v==='(');
+        const isFCall = nxt.t==='op'&&nxt.v==='('&&cur.t==='id'&&isFunc(cur.v);
+        if(leftOk&&rightOk&&!isFCall)out.push({t:'op',v:'*'});
+    }
+    tokens=out;
 
-    c = c.toLowerCase();
-    for (const [n,v] of Object.entries(CONSTS)) c = c.replaceAll(n, `(${v})`);
-
-    // Replace root placeholders with JS functions
-    c = c.replace(/sqrt\(/g,  'Math.sqrt(');
-    c = c.replace(/cbrt\(/g,  'Math.cbrt(');
-    // For prefix root symbols without parens, wrap the next token
-    c = c.replace(/sqrt([^(])/g,  'Math.sqrt($1');
-    c = c.replace(/cbrt([^(])/g,  'Math.cbrt($1');
-    c = c.replace(/fourthroot\(/g, 'Math.pow(');   // ∜(x) → Math.pow(x — needs ,0.25) below
-    c = c.replace(/fourthroot([^(])/g, 'Math.pow($1');
-
-    // Fixup: fourthroot(x) → Math.pow(x, 0.25) — insert ,0.25 before closing paren
-    // Simple approach: replace fourthroot(…) by tracking parens
-    c = c.replace(/math\.pow\(([^,)]+)\)(?!.*,)/g, 'Math.pow($1,0.25)');
-
-    // n√x → Math.pow(x, 1/n) e.g. 3√8 → Math.pow(8,1/3)
-    c = c.replace(/(\d+(?:\.\d+)?)√([^+\-*/^()]+)/gi, 'Math.pow($2,1/$1)');
-
-    // ── Whitelist (now includes letters for Math.*) ───────────────────────────
-    if (!/^[\d.+\-*/^()Math.sqrtcbpow,]+$/.test(c)) return null;
-
-    const s = c.replace(/\^/g,'**');
-    if (/\*\*\s*\d{4,}/.test(s)) return null;
+    // 4. Recursive descent parser
+    let pos=0;
+    const peek=()=>tokens[pos];
+    const consume=()=>tokens[pos++];
+    function parseExpr(){
+        let l=parseTerm();
+        while(peek()&&(peek().v==='+'||peek().v==='-')){const op=consume().v;const r=parseTerm();l=op==='+'?l.add(r):l.sub(r);}
+        return l;
+    }
+    function parseTerm(){
+        let l=parsePow();
+        while(peek()&&(peek().v==='*'||peek().v==='/')){const op=consume().v;const r=parsePow();l=op==='*'?l.mul(r):l.div(r);}
+        return l;
+    }
+    function parsePow(){
+        const base=parseUnary();
+        if(peek()&&peek().v==='^'){consume();return base.pow(parsePow());} // right-assoc
+        return base;
+    }
+    function parseUnary(){
+        if(peek()&&peek().v==='-'){consume();return parseUnary().neg();}
+        if(peek()&&peek().v==='+'){consume();return parseUnary();}
+        return parseAtom();
+    }
+    function parseAtom(){
+        const tok=peek();
+        if(!tok)throw new Error('unexpected end');
+        if(tok.t==='n'){consume();return new C(tok.v,0);}
+        if(tok.t==='id'){
+            consume();
+            if(peek()&&peek().v==='('){
+                consume();
+                const arg=parseExpr();
+                if(peek()&&peek().v===')')consume();
+                if(tok.v==='sqrt')return arg.sqrt();
+                if(tok.v==='cbrt')return arg.cbrt();
+                if(/^nrt(\d+)$/.test(tok.v))return arg.nthRoot(parseInt(tok.v.slice(3)));
+                throw new Error(`unknown fn: ${tok.v}`);
+            }
+            if(CCONSTS[tok.v])return CCONSTS[tok.v];
+            throw new Error(`unknown id: ${tok.v}`);
+        }
+        if(tok.t==='op'&&tok.v==='('){
+            consume();const val=parseExpr();
+            if(peek()&&peek().v===')')consume();
+            return val;
+        }
+        throw new Error(`unexpected: ${JSON.stringify(tok)}`);
+    }
 
     try {
-        const r = Function('"use strict";return ('+s+')')();
-        return (typeof r==='number'&&isFinite(r)&&!isNaN(r)) ? Math.round(r) : null;
+        const result = parseExpr();
+        if(!result.isReal())return null;          // complex result — not a valid count
+        if(!isFinite(result.r)||isNaN(result.r))return null;
+        const rounded = Math.round(result.r);
+        if(Math.abs(rounded)>10_000_000)return null;
+        return rounded;
     } catch { return null; }
 }
+
 function generateExpressions(n) {
     const cands=[], phi=(1+Math.sqrt(5))/2;
     const cs=[['phi',phi],['pi',Math.PI],['e',Math.E],['sqrt2',Math.SQRT2],['tau',Math.PI*2]];
