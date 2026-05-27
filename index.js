@@ -253,6 +253,7 @@ const CCONSTS = {
     pi: new C(Math.PI), e: new C(Math.E), phi: new C((1 + Math.sqrt(5)) / 2),
     tau: new C(Math.PI * 2), sqrt2: new C(Math.SQRT2), i: new C(0, 1),
 };
+const CFUNCS_REAL = { floor: v => new C(Math.floor(v.r)), ceil: v => new C(Math.ceil(v.r)), abs: v => new C(Math.hypot(v.r, v.i)) };
 const CONSTS = { phi: (1 + Math.sqrt(5)) / 2, pi: Math.PI, e: Math.E, tau: Math.PI * 2, sqrt2: Math.SQRT2 };
 
 function safeMath(expr) {
@@ -263,6 +264,7 @@ function safeMath(expr) {
         } else norm += s[k];
     }
     s = norm.replace(/[×·•]/g, '*').replace(/÷/g, '/').replace(/−/g, '-').replace(/\s+/g, '').toLowerCase();
+    s = s.replace(/\*\*/g, '^'); // ** acts as power
     s = s.replace(/(\d+)√/g, (_, n) => `nrt${n}(`);
     s = s.replace(/∜/g, 'nrt4(').replace(/∛/g, 'cbrt(').replace(/√/g, 'sqrt(');
 
@@ -279,7 +281,7 @@ function safeMath(expr) {
         } else k++;
     }
 
-    const FUNCS = new Set(['sqrt', 'cbrt']);
+    const FUNCS = new Set(['sqrt', 'cbrt', 'floor', 'ceil', 'abs']);
     const isFunc = v => FUNCS.has(v) || /^nrt\d+$/.test(v);
     const out = [];
     for (let j = 0; j < tokens.length; j++) {
@@ -328,6 +330,7 @@ function safeMath(expr) {
                 if (peek() && peek().v === ')') consume();
                 if (tok.v === 'sqrt') return arg.sqrt();
                 if (tok.v === 'cbrt') return arg.cbrt();
+                if (tok.v === 'floor' || tok.v === 'ceil' || tok.v === 'abs') return CFUNCS_REAL[tok.v](arg);
                 if (/^nrt(\d+)$/.test(tok.v)) return arg.nthRoot(parseInt(tok.v.slice(3)));
                 throw new Error(`unknown fn: ${tok.v}`);
             }
@@ -386,7 +389,8 @@ function buildHelpPage(page) {
             { name: 'Simple mode', value: 'No resets — wrong messages are silently deleted.' },
         ).setFooter({ text: 'Page 1/4' }),
         E('#5865F2', 'Commands').setDescription('All commands:').addFields(
-            { name: 'Counting', value: '`/counting channel` `/counting setcount` `/counting reset`' },
+            { name: 'Counting', value: '`/counting reset`' },
+            { name: 'Config',   value: '`/config channel` `/config setcount` `/config view` `/config maxstreak` `/config expressions` `/config access` `/config counttype`' },
             { name: 'Stats',    value: '`/stats [user]` `/leaderboard server` `/leaderboard global` `/leaderboard highscores`' },
             { name: 'Utilities', value: '`/calculate [expression]` `/invite` `/help` `/setup`' },
         ).setFooter({ text: 'Page 2/4' }),
@@ -460,10 +464,10 @@ client.once('ready', async () => {
     client.user.setPresence({ activities: [{ name: 'Counting things', type: ActivityType.Watching }], status: 'online' });
     const cmds = [
         new SlashCommandBuilder().setName('counting').setDescription('Configure or view the counting game')
-            .addSubcommand(s => s.setName('channel').setDescription('Set the counting channel').addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)))
-            .addSubcommand(s => s.setName('setcount').setDescription('Set the current count to any number (for transferring from another bot)').addIntegerOption(o => o.setName('number').setDescription('Number to set the count to').setRequired(true).setMinValue(0).setMaxValue(10000000)))
             .addSubcommand(s => s.setName('reset').setDescription('Manually reset the count')),
         new SlashCommandBuilder().setName('config').setDescription('Configure bot settings')
+            .addSubcommand(s => s.setName('channel').setDescription('Set the counting channel').addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)))
+            .addSubcommand(s => s.setName('setcount').setDescription('Set the current count (transfer from another bot)').addIntegerOption(o => o.setName('number').setDescription('Number').setRequired(true).setMinValue(0).setMaxValue(1000)))
             .addSubcommand(s => s.setName('view').setDescription('View current count and settings'))
             .addSubcommand(s => s.setName('maxstreak').setDescription('Max consecutive counts per user').addIntegerOption(o => o.setName('amount').setDescription('1–100').setRequired(true).setMinValue(1).setMaxValue(100)))
             .addSubcommand(s => s.setName('expressions').setDescription('Allow math expressions').addBooleanOption(o => o.setName('enabled').setDescription('Enable/disable').setRequired(true)))
@@ -792,6 +796,8 @@ client.on('interactionCreate', async interaction => {
             }
             await interaction.deferReply(ep());
             const state = await getState(gid);
+            if (sub === 'channel') { const ch = options.getChannel('channel'); if (!ch.isTextBased()) return interaction.editReply({ content: 'Text channel required.' }); state.channelId = ch.id; saveState(gid, state); return interaction.editReply({ embeds: [E('#5865F2', 'Channel set').setDescription(`Counting channel set to ${ch}. Start from **1**!`)] }); }
+            if (sub === 'setcount') { const num = options.getInteger('number'), prev = state.current; state.current = num; state.lastUserId = null; state.consecutiveCount = 0; if (num > state.highScore) state.highScore = num; saveState(gid, state); if (state.channelId) { const ch = interaction.guild.channels.cache.get(state.channelId); if (ch) ch.send({ embeds: [E('#5865F2', 'Count set').setDescription(`Count set from **${prev}** to **${num}**. Next: **${num + 1}**.`)] }).catch(() => {}); } return interaction.editReply({ content: `Count set to **${num}**. Next: **${num + 1}**.` }); }
             if (sub === 'maxstreak')   { state.maxStreak = options.getInteger('amount'); saveState(gid, state); return interaction.editReply({ embeds: [E('#5865F2', 'Max streak updated').setDescription(state.maxStreak === 1 ? 'Users can\'t count twice in a row.' : `Users can count **${state.maxStreak}** times in a row.`)] }); }
             if (sub === 'expressions') { state.allowExpressions = options.getBoolean('enabled'); saveState(gid, state); return interaction.editReply({ embeds: [E('#5865F2', `Expressions ${state.allowExpressions ? 'enabled' : 'disabled'}`).setDescription(state.allowExpressions ? 'Expressions like `1+1`, `pi^2` are now allowed.' : 'Only plain numbers accepted.')] }); }
         }
@@ -801,20 +807,6 @@ client.on('interactionCreate', async interaction => {
             if (!await hasPerm(interaction, gid)) return interaction.reply({ content: 'No permission.', ...ep() });
             await interaction.deferReply(ep());
             const state = await getState(gid);
-            if (sub === 'channel') {
-                const ch = options.getChannel('channel');
-                if (!ch.isTextBased()) return interaction.editReply({ content: 'Text channel required.' });
-                state.channelId = ch.id; saveState(gid, state);
-                return interaction.editReply({ embeds: [E('#5865F2', 'Channel set').setDescription(`Counting channel set to ${ch}. Start from **1**!`)] });
-            }
-            if (sub === 'setcount') {
-                const num = options.getInteger('number'), prev = state.current;
-                state.current = num; state.lastUserId = null; state.consecutiveCount = 0;
-                if (num > state.highScore) state.highScore = num;
-                saveState(gid, state);
-                if (state.channelId) { const ch = interaction.guild.channels.cache.get(state.channelId); if (ch) ch.send({ embeds: [E('#5865F2', 'Count set').setDescription(`Count manually set from **${prev}** to **${num}**. Next number is **${num + 1}**.`)] }).catch(() => {}); }
-                return interaction.editReply({ content: `Count set to **${num}**. Next number is **${num + 1}**.` });
-            }
             if (sub === 'reset') {
                 const prev = state.current; state.current = 0; state.lastUserId = null; state.consecutiveCount = 0; saveState(gid, state);
                 if (state.channelId) { const ch = interaction.guild.channels.cache.get(state.channelId); if (ch) ch.send({ embeds: [E('#ff9900', '🔄 Count reset').setDescription(`Admin reset from **${prev}** to 0. Start again from **1**!`)] }).catch(() => {}); }
