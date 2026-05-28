@@ -163,14 +163,14 @@ async function buildGlobalServersEmbed(page) {
     const { rows, total } = await getGlobalServersPage(page);
     const tp = Math.max(1, Math.ceil(total / PS)), off = (page - 1) * PS;
     if (!rows.length) return { embed: E('#5865F2', '🌍 Global — Servers').setDescription('No stats yet!'), totalPages: 1 };
-    const lines = await Promise.all(rows.map(async (r, i) => `${M[off + i] ?? `**${off + i + 1}.**`} **${await guildName(r.guild_id)}** — 🔢 **${r.cur}**`));
-    return { totalPages: tp, embed: E('#5865F2', '🌍 Global Leaderboard — Servers').setDescription(lines.join('\n')).setFooter({ text: `Page ${page}/${tp} · ranked by current count` }) };
+    const lines = await Promise.all(rows.map(async (r, i) => { const gs = await getState(r.guild_id); const mode = (gs.countType ?? 'interactive') === 'simple' ? '🟢' : '🎮'; return `${M[off + i] ?? `**${off + i + 1}.**`} **${await guildName(r.guild_id)}** ${mode} — 🔢 **${r.cur}**`; }));
+    return { totalPages: tp, embed: E('#5865F2', '🌍 Global Leaderboard — Servers').setDescription(lines.join('\n')).setFooter({ text: `Page ${page}/${tp} · 🎮 Interactive · 🟢 Simple · ranked by current count` }) };
 }
 async function buildHighscoresEmbed(page) {
     const { rows, total } = await getHighscoresPage(page);
     const tp = Math.max(1, Math.ceil(total / PS)), off = (page - 1) * PS;
     if (!rows.length) return { embed: E('#5865F2', '🏅 High Score Leaderboard').setDescription('No data yet!'), totalPages: 1 };
-    const lines = await Promise.all(rows.map(async (r, i) => `${M[off + i] ?? `**${off + i + 1}.**`} **${await guildName(r.guild_id)}** — 🏆 **${r.hs}** · 🔢 ${r.cur}`));
+    const lines = await Promise.all(rows.map(async (r, i) => { const gs = await getState(r.guild_id); const mode = (gs.countType ?? 'interactive') === 'simple' ? '🟢' : '🎮'; return `${M[off + i] ?? `**${off + i + 1}.**`} **${await guildName(r.guild_id)}** ${mode} — 🏆 **${r.hs}** · 🔢 ${r.cur}`; }));
     return { totalPages: tp, embed: E('#5865F2', '🏅 All-Time High Score Leaderboard').setDescription(lines.join('\n')).setFooter({ text: `Page ${page}/${tp} · ranked by all-time high score` }) };
 }
 
@@ -264,7 +264,7 @@ function lambertW(x) {
     }
     return w;
 }
-const CFUNCS_REAL = { floor: v => new C(Math.floor(v.r)), ceil: v => new C(Math.ceil(v.r)), abs: v => new C(Math.hypot(v.r, v.i)), lambertw: v => new C(lambertW(v.r)), lw: v => new C(lambertW(v.r)) };
+const CFUNCS_REAL = { floor: v => new C(Math.floor(v.r)), ceil: v => new C(Math.ceil(v.r)), abs: v => new C(Math.hypot(v.r, v.i)), lambertw: v => new C(lambertW(v.r)), lw: v => new C(lambertW(v.r)), w: v => new C(lambertW(v.r)) };
 const CONSTS = { phi: (1 + Math.sqrt(5)) / 2, pi: Math.PI, e: Math.E, tau: Math.PI * 2, sqrt2: Math.SQRT2 };
 
 function safeMath(expr) {
@@ -292,7 +292,7 @@ function safeMath(expr) {
         } else k++;
     }
 
-    const FUNCS = new Set(['sqrt', 'cbrt', 'floor', 'ceil', 'abs', 'lambertw', 'lw']);
+    const FUNCS = new Set(['sqrt', 'cbrt', 'floor', 'ceil', 'abs', 'lambertw', 'lw', 'w']);
     const isFunc = v => FUNCS.has(v) || /^nrt\d+$/.test(v);
     const out = [];
     for (let j = 0; j < tokens.length; j++) {
@@ -525,7 +525,9 @@ client.on('messageCreate', async message => {
     const expected = state.current + 1;
 
     if (state.countType === 'simple') {
-        const streakViolation = state.maxStreak > 0 && message.author.id === state.lastUserId && state.consecutiveCount >= state.maxStreak;
+        const sameUser = message.author.id === state.lastUserId;
+        const newStreak = sameUser ? state.consecutiveCount + 1 : 1;
+        const streakViolation = state.maxStreak > 0 && sameUser && newStreak > state.maxStreak;
         if (value === null || value !== expected || streakViolation) {
             const me = message.guild.members.me;
             if (!me?.permissionsIn(message.channel).has(PermissionFlagsBits.ManageMessages)) {
@@ -535,7 +537,7 @@ client.on('messageCreate', async message => {
             await message.delete().catch(e => console.error('Simple mode delete failed:', e.message));
             return;
         }
-        state.current = value; state.lastUserId = message.author.id;
+        state.current = value; state.lastUserId = message.author.id; state.consecutiveCount = newStreak;
         if (value > state.highScore) state.highScore = value;
         saveState(gid, state);
         await updateUserStat(gid, message.author.id, { correct: 1 });
